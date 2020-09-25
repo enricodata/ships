@@ -1,0 +1,136 @@
+---
+title: "Marine data"
+output: flexdashboard::flex_dashboard
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(dplyr)
+library(shinyjs)
+library(leaflet)
+library(geosphere)
+library(vroom)
+```
+
+```{r to run it just once, eval=FALSE, include=FALSE}
+# to work with a lighter csv
+ships <- readr::read_csv("ships.csv")
+ships_reduced <- ships %>% select(LAT, LON, SHIPNAME, ship_type,DATETIME)
+data.table::fwrite(ships_reduced, "ships_reduced.csv")
+```
+
+```{r}
+ships <- as.data.frame(vroom("ships_reduced.csv", delim = ","))
+
+vessel_types <- unique(ships$ship_type)
+vessel_types <- sort(vessel_types)
+vessel_types <- c(" ", vessel_types)
+
+vessel_names <- unique(ships$SHIPNAME)
+```
+
+Ships {data-icon="fa-ship"}
+===
+
+Inputs {.sidebar}
+-------------------------------------
+
+```{r}
+useShinyjs(rmd = TRUE)
+
+tags$style("#vessel_type {width:230px}")
+label1 <- HTML(paste0("Select a ", strong("vessel type"),":" ))
+selectizeInput("vessel_type", label = label1, choices = vessel_types, multiple = FALSE, selected=vessel_types[1], options = list(placeholder = 'Select one     '))
+
+tags$style("#vessel_name {width:230px}")
+label2 <- HTML(paste0("Select a ", strong("vessel name"),":" ))
+selectizeInput("vessel_name", label = label2, choices = vessel_names, multiple = FALSE, selected=NULL, options = list(placeholder = 'Select one     '))
+
+tags$style("#Search {width:230px}")
+actionButton("Search", "Run", icon("search"), style="color: #fff; background-color: #337ab7; border-color: #2e6da4")
+
+observe({
+   if (is.null(input$vessel_type) || input$vessel_type == "" || is.null(input$vessel_name) || input$vessel_name == "") {
+     shinyjs::disable("Search")
+   } else {
+     shinyjs::enable("Search")
+   }
+ })
+
+observeEvent(input$vessel_type, {
+type_selected <- ships %>% filter(ship_type==input$vessel_type)
+unique_names <- unique(type_selected$SHIPNAME)
+
+unique_names <- sort(unique_names)
+unique_names <- c(" ", unique_names)
+
+updateSelectInput(session, "vessel_name", choices = unique_names)
+})
+
+```
+
+Row {.tabset}
+--------------------------------------------------
+
+```{r}
+result <- eventReactive (input$Search,{
+
+ships <- ships %>% filter(SHIPNAME==input$vessel_name)
+ships <- as.data.frame(ships)
+
+ships$lag_LON <- lag(ships$LON)
+ships$lag_LAT <- lag(ships$LAT)
+
+for (i in 1:nrow(ships)){
+distance <- distm(c(ships$lag_LON[i], ships$lag_LAT[i]), c(ships$LON[i], ships$LAT[i]), fun = distHaversine)
+distance <- distance[1]
+ships$distance[i] <- distance
+}
+
+# to consider only observations that are in chronological order
+ships$lag_time <- lag(ships$DATETIME)
+ships$time_diff <- ships$DATETIME - ships$lag_time
+ships$distance <- ifelse(ships$time_diff<0, 0, ships$distance)
+
+ships <- ships[!is.na(ships$distance),]
+ships <- ships %>% filter(distance == max(distance))
+
+if(nrow(ships)>1){
+  ships <- ships %>% slice(which.max(DATETIME))
+}
+
+ships$distance <- round(ships$distance, 0)
+
+Departure <- c(ships$lag_LAT, ships$lag_LON, "Departure")
+Arrival <- c(ships$LAT, ships$LON, "Arrival")
+Travel <- rbind(Departure, Arrival)
+Travel <- as.data.frame(Travel)
+names(Travel) <- c("lat", "long", "labels")
+Travel$lat <- as.numeric(as.character(Travel$lat))
+Travel$long <- as.numeric(as.character(Travel$long))
+
+list(Travel=Travel, distance=ships$distance[1])
+
+   })
+```
+
+
+### Map
+
+```{r }
+leafletOutput("map") 
+
+ output$map <- renderLeaflet({
+ leaflet(data=result()[['Travel']]) %>% 
+     addTiles() %>%  
+     addMarkers(~long, ~lat, popup = ~as.character(labels), label = ~as.character(labels),labelOptions = labelOptions(noHide = T)) %>%
+  setView(lng =  result()[['Travel']]$long[1], lat = result()[['Travel']]$lat[1], zoom = 8) %>% addLegend("bottomleft", 
+  colors =c(""),
+  labels= c(""),
+  title= paste0("Distance in metres: ", result()[['distance']]),
+  opacity = 1)   
+  })
+```
+
+
